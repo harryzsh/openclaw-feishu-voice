@@ -1,0 +1,49 @@
+{
+  "tools": {
+    "media": {
+      "audio": {
+        "enabled": true,
+        "echoTranscript": false,
+        "models": [
+          {
+            "type": "cli",
+            "command": "python3",
+            "args": [
+              "/path/to/scripts/transcribe.py",
+              "{{MediaPath}}"
+            ],
+            "timeoutSeconds": 30
+          }
+        ]
+      }
+    }
+  },
+  "messages": {
+    "tts": {
+      "auto": "always",
+      "provider": "openai",
+      "openai": {
+        "apiKey": "dummy-not-needed",
+        "baseUrl": "http://localhost:8080/v1",
+        "model": "polly",
+        "voice": "Zhiyu"
+      }
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "polly-voice-reply": {
+          "enabled": true
+        }
+      },
+      "load": {
+        "extraDirs": [
+          "/path/to/hooks"
+        ]
+      }
+    }
+  }
+}
