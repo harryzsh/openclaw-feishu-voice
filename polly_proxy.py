@@ -147,23 +147,28 @@ async def synthesize_speech(request: TTSRequest):
         logger.error("BotoCoreError: %s", e)
         raise HTTPException(status_code=500, detail=f"AWS error: {e}")
 
-    audio_bytes = resp["AudioStream"].read()
-    logger.info("Polly OK: %d bytes", len(audio_bytes))
+    mp3_bytes = resp["AudioStream"].read()
+    logger.info("Polly OK: %d bytes (mp3)", len(mp3_bytes))
 
-    # 异步发飞书语音（不阻塞主响应）
-    if len(request.input) <= MAX_TTS_CHARS:
-        chat_id = request.feishu_chat_id or FEISHU_DEFAULT_CHAT_ID
-        receive_type = request.feishu_receive_type or "chat_id"
-        asyncio.create_task(send_feishu_audio(audio_bytes, chat_id, receive_type))
-        logger.info("Feishu audio task queued for chat_id=%s", chat_id)
-    else:
-        logger.info("Text too long (%d > %d), skipping Feishu send", len(request.input), MAX_TTS_CHARS)
+    # mp3 -> opus/ogg so OpenClaw marks it voiceCompatible and routes audioAsVoice
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "mp3", "-i", "pipe:0",
+         "-c:a", "libopus", "-b:a", "32k", "-ar", "48000", "-ac", "1",
+         "-f", "ogg", "pipe:1"],
+        input=mp3_bytes, capture_output=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        logger.error("ffmpeg mp3->opus failed: %s", proc.stderr.decode(errors="ignore"))
+        raise HTTPException(status_code=500, detail="opus encoding failed")
+    opus_bytes = proc.stdout
+    logger.info("opus OK: %d bytes", len(opus_bytes))
 
     return StreamingResponse(
-        io.BytesIO(audio_bytes),
-        media_type="audio/mpeg",
+        io.BytesIO(opus_bytes),
+        media_type="audio/ogg",
         headers={
-            "Content-Length": str(len(audio_bytes)),
+            "Content-Length": str(len(opus_bytes)),
             "X-Voice-Id": request.voice,
         },
     )
