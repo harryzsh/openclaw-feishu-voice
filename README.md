@@ -2,6 +2,8 @@
 
 > 实现飞书群聊中的完整语音交互：语音消息输入 → AI 理解 → AI 回复 → 语音消息输出
 
+**Current version:** `v2.0.0` — synced from production (EC2 `/home/ubuntu/transcribe_polly/`)
+
 ---
 
 ## 整体架构
@@ -26,13 +28,15 @@
 └──────────┬───────────┘              ┌───────┴──────────────┐
            │                          │   Polly Proxy        │
            │  python3 transcribe.py   │   localhost:8080      │
-           ▼                          │                      │
-┌──────────────────────┐              │  - 兼容 OpenAI TTS   │
-│  AWS Transcribe      │              │    API 格式           │
-│  Streaming           │              │  - 调用 AWS Polly     │
-│  (语音 → 文字)        │              │    生成 MP3 返回      │
-│  Language: zh-CN     │              │  - 不做任何发送逻辑   │
-└──────────────────────┘              └──────────────────────┘
+           ▼                          │   (polly_proxy.py)   │
+┌──────────────────────┐              │                      │
+│  AWS Transcribe      │              │  - 兼容 OpenAI TTS   │
+│  Streaming           │              │    API 格式           │
+│  (语音 → 文字)        │              │  - 调用 AWS Polly     │
+│  Language: zh-CN     │              │    生成 MP3 返回      │
+└──────────────────────┘              │  - 可选：同步发       │
+                                       │    飞书语音气泡      │
+                                       └──────────────────────┘
                                                │
                                        ┌───────┴──────────────┐
                                        │       AWS Polly       │
@@ -53,8 +57,8 @@
 1. 用户在飞书发送语音消息
 2. 飞书推送 Webhook 到 OpenClaw，携带 `file_key` 和 `duration`
 3. OpenClaw 下载音频文件（飞书 opus 格式）
-4. 调用 `scripts/transcribe.py <audio_file>`：
-   - FFmpeg 将音频转为 16kHz PCM（s16le 格式）
+4. 调用 `transcribe.py <audio_file>`：
+   - FFmpeg 将音频转为 16kHz PCM（`s16le` 格式）
    - 流式推送给 AWS Transcribe Streaming API
    - 返回转录文字到 stdout
 5. OpenClaw 拿到文字，当做普通文本消息处理
@@ -64,24 +68,27 @@
 
 1. AI 生成文字回复
 2. OpenClaw `tts()` 工具向 `http://localhost:8080/v1/audio/speech` 发 POST
-3. Polly Proxy 接收请求，调用 AWS Polly 生成 MP3，返回音频流
+3. `polly_proxy.py` 接收请求，调用 AWS Polly 生成 MP3，返回音频流
 4. **OpenClaw 原生处理**：检测到当前 channel 为 `feishu`（在 `VOICE_BUBBLE_CHANNELS` 内），自动将 MP3 转 opus 并以语音气泡形式发送给用户
 
 ---
 
-## 目录结构
+## 目录结构（v2.0.0 扁平化）
 
 ```
 openclaw-feishu-voice/
-├── README.md                  # 本文档
-├── polly-proxy/
-│   ├── main.py                # AWS Polly TTS 代理服务（FastAPI，纯 TTS 生成）
-│   └── requirements.txt       # Polly 代理依赖
-├── scripts/
-│   └── transcribe.py          # AWS Transcribe 语音转文字脚本
-├── requirements-polly.txt     # Polly 代理依赖（legacy）
-└── requirements-transcribe.txt # Transcribe 脚本依赖
+├── README.md                         # 本文档
+├── polly_proxy.py                    # AWS Polly TTS 代理（FastAPI，v2.0.0）
+├── transcribe.py                     # AWS Transcribe 流式转录脚本
+├── requirements.txt                  # Python 依赖（proxy + transcribe）
+├── config/
+│   └── openclaw-audio-tts.json       # OpenClaw 音频/TTS 配置片段示例
+└── hooks/
+    └── polly-voice-reply/
+        └── handler.ts                # 可选 OpenClaw hook（发送飞书语音气泡）
 ```
+
+> v1 的 `polly-proxy/main.py`、`scripts/transcribe.py`、`requirements-*.txt` 已合并到根目录。
 
 ---
 
@@ -89,7 +96,7 @@ openclaw-feishu-voice/
 
 - Python 3.9+
 - FFmpeg（系统级安装）
-- AWS 凭证（IAM 权限：`transcribe:*` + `polly:SynthesizeSpeech`）
+- AWS 凭证（IAM 权限：`transcribe:StartStreamTranscription` + `polly:SynthesizeSpeech`）
 - OpenClaw Gateway
 
 ```bash
@@ -105,26 +112,20 @@ aws configure
 
 ## 安装与启动
 
-### 1. 安装 Polly Proxy 依赖
+### 1. 安装依赖
 
 ```bash
-pip install -r polly-proxy/requirements.txt
+pip install -r requirements.txt
 ```
 
-### 2. 安装 Transcribe 脚本依赖
+### 2. 启动 Polly Proxy
 
 ```bash
-pip install -r requirements-transcribe.txt
-```
-
-### 3. 启动 Polly Proxy
-
-```bash
-python3 polly-proxy/main.py
+python3 polly_proxy.py
 # 服务启动在 http://localhost:8080
 ```
 
-建议用 systemd 管理：
+建议用 systemd 管理（生产 EC2 实际使用的 unit）：
 
 ```ini
 # ~/.config/systemd/user/polly-proxy.service
@@ -133,24 +134,30 @@ Description=Polly TTS Proxy
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /home/ubuntu/polly-proxy/main.py
-WorkingDirectory=/home/ubuntu/polly-proxy
+Type=simple
+WorkingDirectory=/home/ubuntu/transcribe_polly
+ExecStart=/usr/bin/python3 /home/ubuntu/transcribe_polly/polly_proxy.py
 Restart=always
+RestartSec=5
+StandardOutput=append:/tmp/polly-proxy.log
+StandardError=append:/tmp/polly-proxy.log
 
 [Install]
 WantedBy=default.target
 ```
 
 ```bash
+systemctl --user daemon-reload
 systemctl --user enable polly-proxy
 systemctl --user start polly-proxy
+systemctl --user status polly-proxy
 ```
 
 ---
 
 ## OpenClaw 配置
 
-在 `~/.openclaw/openclaw.json` 中配置以下关键字段：
+在 `~/.openclaw/openclaw.json` 中配置以下关键字段（完整示例见 [`config/openclaw-audio-tts.json`](config/openclaw-audio-tts.json)）：
 
 ### 音频转录配置（STT）
 
@@ -160,11 +167,12 @@ systemctl --user start polly-proxy
     "audio": {
       "enabled": true,
       "echoTranscript": false,
+      "echoFormat": "📝 \"{transcript}\"",
       "models": [
         {
           "type": "cli",
           "command": "python3",
-          "args": ["/home/ubuntu/scripts/transcribe.py", "{{MediaPath}}"],
+          "args": ["/home/ubuntu/transcribe_polly/transcribe.py", "{{MediaPath}}"],
           "timeoutSeconds": 30
         }
       ]
@@ -173,27 +181,34 @@ systemctl --user start polly-proxy
 }
 ```
 
-### TTS 语音输出配置
+- `echoTranscript` 为 `true` 时会把转录文字回显给用户
+- `echoFormat` 自定义回显模板（`{transcript}` 被替换为识别文字）
+
+### TTS 语音输出配置（新格式：`providers.openai`）
 
 ```json
 "messages": {
   "tts": {
     "auto": "always",
     "provider": "openai",
-    "openai": {
-      "apiKey": "dummy-not-needed",
-      "baseUrl": "http://localhost:8080/v1",
-      "model": "polly",
-      "voice": "Zhiyu"
+    "providers": {
+      "openai": {
+        "apiKey": "dummy-not-needed",
+        "baseUrl": "http://localhost:8080/v1",
+        "model": "polly",
+        "voice": "Zhiyu"
+      }
     }
   }
 }
 ```
 
 - `provider: "openai"` — OpenClaw 使用 OpenAI TTS 兼容格式
-- `baseUrl` 指向本地 Polly Proxy（端口 8080）
+- `providers.openai.baseUrl` 指向本地 Polly Proxy（端口 8080）
 - `voice: "Zhiyu"` — AWS Polly 中文女声（神经网络引擎）
-- 飞书 channel 会自动触发语音气泡（无需额外配置）
+- 飞书 channel 自动触发语音气泡（无需额外配置）
+
+> ⚠️ v1 旧格式 `"openai": {...}`（与 `provider` 平级）已废弃；请改为 `"providers": {"openai": {...}}`。
 
 ### 飞书插件配置
 
@@ -255,7 +270,7 @@ curl -X POST http://localhost:8080/v1/audio/speech \
   --output test.mp3
 
 # 测试 Transcribe 脚本
-python3 scripts/transcribe.py /path/to/audio.opus
+python3 transcribe.py /path/to/audio.opus
 
 # 健康检查
 curl http://localhost:8080/health
@@ -269,6 +284,7 @@ curl http://localhost:8080/health
 2. **飞书音频格式**：飞书发送的语音为 opus 格式，FFmpeg 可直接处理
 3. **Transcribe 区域**：`transcribe.py` 默认使用 `us-east-1`，可按需修改
 4. **AWS 凭证**：建议在 EC2 上使用 IAM Role，无需配置 access key
+5. **TTS 配置格式升级**：若从 v1 升级，把 `messages.tts.openai` 移到 `messages.tts.providers.openai`
 
 ---
 
@@ -278,5 +294,19 @@ curl http://localhost:8080/health
 - **AWS Transcribe Streaming** — 实时语音转文字
 - **AWS Polly** — 神经网络 TTS（文字转语音）
 - **FastAPI + uvicorn** — Polly Proxy 服务
-- **FFmpeg** — 音频格式转换（OpenClaw 内部使用）
+- **FFmpeg** — 音频格式转换
 - **飞书开放平台** — 消息收发和文件管理
+
+---
+
+## Changelog
+
+### v2.0.0 (2026-04-18) — production sync
+- 目录扁平化：根目录放 `polly_proxy.py` / `transcribe.py` / `requirements.txt`
+- 移除 `polly-proxy/`、`scripts/`、`requirements-polly.txt`、`requirements-transcribe.txt`
+- README/systemd unit/路径全部对齐生产环境（`/home/ubuntu/transcribe_polly/`）
+- TTS 配置改为新格式 `messages.tts.providers.openai`
+- 补充 `tools.media.audio.echoFormat` 示例
+
+### v1.0.0
+- 初始版本，`polly-proxy/main.py` + `scripts/transcribe.py` 分家布局

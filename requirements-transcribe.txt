@@ -1,2 +1,0 @@
-amazon-transcribe
-boto3

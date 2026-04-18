@@ -4,12 +4,13 @@
       "audio": {
         "enabled": true,
         "echoTranscript": false,
+        "echoFormat": "📝 \"{transcript}\"",
         "models": [
           {
             "type": "cli",
             "command": "python3",
             "args": [
-              "/path/to/scripts/transcribe.py",
+              "/path/to/transcribe_polly/transcribe.py",
               "{{MediaPath}}"
             ],
             "timeoutSeconds": 30
@@ -22,11 +23,13 @@
     "tts": {
       "auto": "always",
       "provider": "openai",
-      "openai": {
-        "apiKey": "dummy-not-needed",
-        "baseUrl": "http://localhost:8080/v1",
-        "model": "polly",
-        "voice": "Zhiyu"
+      "providers": {
+        "openai": {
+          "apiKey": "dummy-not-needed",
+          "baseUrl": "http://localhost:8080/v1",
+          "model": "polly",
+          "voice": "Zhiyu"
+        }
       }
     }
   },
